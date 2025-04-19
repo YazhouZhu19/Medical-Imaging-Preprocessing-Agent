@@ -1,0 +1,16 @@
+{
+  "output_format": "nifti",
+  "target_spacing": [1.0, 1.0, 1.0],
+  "preprocessing": {
+    "denoise": {
+      "method": "gaussian",
+      "params": {"sigma": 0.5}
+    },
+    "normalize": {
+      "method": "z-score"
+    },
+    "resample": {
+      "interpolator": "linear"
+    }
+  }
+}
