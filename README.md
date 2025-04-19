@@ -175,24 +175,59 @@ The agent follows an object-oriented modular design with the following component
 
 ## Project Structure
 
+
 ```
 medical-imaging-agent/
 │
-├── medical_imaging_agent.py     # Main script
-├── config.json                  # Default configuration file
-├── requirements.txt             # Dependencies
+├── medical_imaging_agent.py   # 主脚本
+├── config.json                # 默认配置文件
+├── requirements.txt           # 依赖
 │
-├── examples/                    # Usage examples
+├── core/                      # 核心组件
+│   ├── __init__.py
+│   ├── agent.py               # 核心代理类
+│   ├── pipeline.py            # 处理流水线
+│   └── memory_manager.py      # 内存管理
+│
+├── datasets/                  # 数据集模块
+│   ├── __init__.py
+│   ├── dataset.py             # 数据集基类
+│   ├── medical_decathlon.py   # Medical Decathlon数据集
+│   └── tcia.py                # TCIA数据集
+│
+├── preprocessing/             # 预处理模块
+│   ├── __init__.py
+│   ├── preprocessor.py        # 预处理器基类
+│   ├── denoise.py             # 去噪处理器
+│   ├── normalize.py           # 归一化处理器
+│   ├── resample.py            # 重采样处理器
+│   └── gpu_accelerated.py     # GPU加速处理器
+│
+├── io/                        # I/O模块
+│   ├── __init__.py
+│   ├── loader.py              # 图像加载器
+│   └── saver.py               # 图像保存器
+│
+├── utils/                     # 工具函数
+│   ├── __init__.py
+│   ├── logging.py             # 日志工具
+│   ├── visualization.py       # 可视化工具
+│   └── metrics.py             # 评估指标
+│
+├── examples/                  # 使用示例
 │   ├── custom_dataset.py
 │   └── custom_preprocessor.py
 │
-├── tests/                       # Unit tests
+├── tests/                     # 单元测试
 │   ├── test_datasets.py
 │   ├── test_loaders.py
 │   ├── test_preprocessors.py
 │   └── test_agent.py
 │
-└── README.md                    # This file
+└── docs/                      # 文档
+    ├── api/
+    ├── tutorials/
+    └── examples/
 ```
 
 ## Extending the Agent
