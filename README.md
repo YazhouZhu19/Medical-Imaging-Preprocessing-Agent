@@ -1,4 +1,4 @@
-# Medical Imaging Dataset Processing Agent 🚀
+# Medical Imaging Dataset Processing 🚀
 
 A flexible Python agent for automatically downloading open-source medical imaging datasets, applying standardized preprocessing, and saving to a unified format (NIfTI by default).
 
