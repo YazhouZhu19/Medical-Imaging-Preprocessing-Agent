@@ -203,28 +203,28 @@ medical-imaging-agent/
 │   ├── resample.py            
 │   └── gpu_accelerated.py    
 │
-├── io/                        # I/O模块
+├── io/                        
 │   ├── __init__.py
-│   ├── loader.py              # 图像加载器
-│   └── saver.py               # 图像保存器
+│   ├── loader.py              
+│   └── saver.py               
 │
-├── utils/                     # 工具函数
+├── utils/                     
 │   ├── __init__.py
-│   ├── logging.py             # 日志工具
-│   ├── visualization.py       # 可视化工具
-│   └── metrics.py             # 评估指标
+│   ├── logging.py             
+│   ├── visualization.py       
+│   └── metrics.py             
 │
-├── examples/                  # 使用示例
+├── examples/                  
 │   ├── custom_dataset.py
 │   └── custom_preprocessor.py
 │
-├── tests/                     # 单元测试
+├── tests/                     
 │   ├── test_datasets.py
 │   ├── test_loaders.py
 │   ├── test_preprocessors.py
 │   └── test_agent.py
 │
-└── docs/                      # 文档
+└── docs/                     
     ├── api/
     ├── tutorials/
     └── examples/
