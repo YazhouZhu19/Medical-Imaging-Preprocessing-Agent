@@ -179,29 +179,29 @@ The agent follows an object-oriented modular design with the following component
 ```
 medical-imaging-agent/
 │
-├── medical_imaging_agent.py   # 主脚本
-├── config.json                # 默认配置文件
-├── requirements.txt           # 依赖
+├── medical_imaging_agent.py   
+├── config.json                
+├── requirements.txt           
 │
-├── core/                      # 核心组件
+├── core/                      
 │   ├── __init__.py
-│   ├── agent.py               # 核心代理类
-│   ├── pipeline.py            # 处理流水线
-│   └── memory_manager.py      # 内存管理
+│   ├── agent.py               
+│   ├── pipeline.py            
+│   └── memory_manager.py      
 │
-├── datasets/                  # 数据集模块
+├── datasets/                  
 │   ├── __init__.py
-│   ├── dataset.py             # 数据集基类
-│   ├── medical_decathlon.py   # Medical Decathlon数据集
-│   └── tcia.py                # TCIA数据集
+│   ├── dataset.py             
+│   ├── medical_decathlon.py  
+│   └── tcia.py                
 │
-├── preprocessing/             # 预处理模块
+├── preprocessing/             
 │   ├── __init__.py
-│   ├── preprocessor.py        # 预处理器基类
-│   ├── denoise.py             # 去噪处理器
-│   ├── normalize.py           # 归一化处理器
-│   ├── resample.py            # 重采样处理器
-│   └── gpu_accelerated.py     # GPU加速处理器
+│   ├── preprocessor.py        
+│   ├── denoise.py            
+│   ├── normalize.py           
+│   ├── resample.py            
+│   └── gpu_accelerated.py    
 │
 ├── io/                        # I/O模块
 │   ├── __init__.py
