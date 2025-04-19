@@ -4,13 +4,60 @@
   "preprocessing": {
     "denoise": {
       "method": "gaussian",
-      "params": {"sigma": 0.5}
+      "params": {"sigma": 0.5},
+      "use_gpu": true
     },
     "normalize": {
-      "method": "z-score"
+      "method": "z-score",
+      "params": {
+        "percentile_lower": 0.5,
+        "percentile_upper": 99.5
+      }
     },
     "resample": {
-      "interpolator": "linear"
+      "interpolator": "bspline",
+      "params": {
+        "order": 3
+      }
+    }
+  },
+  "performance": {
+    "num_workers": "auto",
+    "memory_limit_mb": 4096,
+    "chunk_size_mb": 512,
+    "use_gpu": true,
+    "cache_intermediate_results": true
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "processing.log",
+    "console": true
+  },
+  "modality_presets": {
+    "ct": {
+      "denoise": {
+        "method": "gaussian",
+        "params": {"sigma": 0.75}
+      },
+      "normalize": {
+        "method": "window",
+        "params": {
+          "window_center": 40,
+          "window_width": 400
+        }
+      }
+    },
+    "mri": {
+      "denoise": {
+        "method": "bilateral",
+        "params": {
+          "domain_sigma": 3.0,
+          "range_sigma": 50.0
+        }
+      },
+      "normalize": {
+        "method": "z-score"
+      }
     }
   }
 }
