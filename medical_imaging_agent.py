@@ -1,474 +1,57 @@
+#!/usr/bin/env python3
 """
-Medical Imaging Dataset Processing Agent
+Medical Imaging Preprocessing Agent
 
-This agent can:
-1. Automatically acquire various open-source medical imaging datasets
-2. Apply a standardized preprocessing pipeline
-3. Save the data in a unified format (NIfTI by default)
+一个灵活的Python代理，用于自动下载开源医学影像数据集，
+应用标准化预处理，并保存为统一格式（默认为NIfTI）。
 """
 
 import os
+import sys
 import json
+import argparse
 import logging
+import time
+import datetime
+import multiprocessing
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple, Union
+
 import numpy as np
 import SimpleITK as sitk
-import nibabel as nib
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union
 from tqdm import tqdm
-import argparse
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("MedicalImagingAgent")
+# 导入自定义模块
+# 注意：这些模块需要在项目其他文件中实现
+from core.memory_manager import MemoryManager
+from datasets.dataset_factory import DatasetFactory
+from io.loader import ImageLoader, DicomLoader, NiftiLoader
+from io.saver import ImageSaver, NiftiSaver
+from preprocessing.preprocessor import PreprocessingPipeline
+from preprocessing.denoise import DenoisingPreprocessor
+from preprocessing.normalize import NormalizationPreprocessor
+from preprocessing.resample import ResamplingPreprocessor
+from utils.logging import ProcessingLogger, ProcessingReport
 
-#--------------------------------------------------------
-# Dataset Classes
-#--------------------------------------------------------
-class Dataset(ABC):
-    """Abstract base class for medical imaging datasets"""
-    
-    def __init__(self, name: str, description: str):
-        self.name = name
-        self.description = description
-    
-    @abstractmethod
-    def download(self, destination: str) -> str:
-        """Download dataset to specified directory"""
-        pass
-    
-    @abstractmethod
-    def get_image_paths(self) -> List[str]:
-        """Get all image paths"""
-        pass
 
-class MedicalDecathlonDataset(Dataset):
-    """Medical Decathlon dataset"""
-    
-    TASKS = {
-        "Task01_BrainTumour": "Brain Tumor Segmentation",
-        "Task02_Heart": "Heart Segmentation",
-        "Task03_Liver": "Liver Segmentation", 
-        "Task04_Hippocampus": "Hippocampus Segmentation",
-        "Task05_Prostate": "Prostate Segmentation",
-        "Task06_Lung": "Lung Segmentation",
-        "Task07_Pancreas": "Pancreas Segmentation",
-        "Task08_HepaticVessel": "Hepatic Vessel Segmentation",
-        "Task09_Spleen": "Spleen Segmentation",
-        "Task10_Colon": "Colon Segmentation"
-    }
-    
-    def __init__(self, task: str):
-        if task not in self.TASKS:
-            raise ValueError(f"Unknown task: {task}. Valid tasks: {list(self.TASKS.keys())}")
-        
-        super().__init__(
-            name=task,
-            description=f"Medical Decathlon: {self.TASKS[task]}"
-        )
-        self.task = task
-        self.base_url = "https://msd-for-monai.s3-us-west-2.amazonaws.com"
-        self.downloaded_path = None
-    
-    def download(self, destination: str) -> str:
-        """Download Medical Decathlon task"""
-        import requests
-        import tarfile
-        
-        os.makedirs(destination, exist_ok=True)
-        tar_file = os.path.join(destination, f"{self.task}.tar")
-        
-        # Check if already downloaded
-        if os.path.exists(tar_file) and os.path.exists(os.path.join(destination, self.task)):
-            logger.info(f"{self.task} already downloaded")
-            self.downloaded_path = os.path.join(destination, self.task)
-            return self.downloaded_path
-        
-        # Download task
-        url = f"{self.base_url}/{self.task}.tar"
-        logger.info(f"Downloading {url} to {tar_file}")
-        
-        response = requests.get(url, stream=True)
-        total_size = int(response.headers.get('content-length', 0))
-        
-        with open(tar_file, 'wb') as f, tqdm(
-            desc=self.task,
-            total=total_size,
-            unit='B',
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as bar:
-            for chunk in response.iter_content(chunk_size=1024*1024):
-                size = f.write(chunk)
-                bar.update(size)
-        
-        # Extract file
-        logger.info(f"Extracting {tar_file} to {destination}")
-        with tarfile.open(tar_file) as tar:
-            tar.extractall(path=destination)
-        
-        self.downloaded_path = os.path.join(destination, self.task)
-        return self.downloaded_path
-    
-    def get_image_paths(self) -> List[str]:
-        """Get all image paths"""
-        if not self.downloaded_path:
-            raise ValueError("Please download the dataset first")
-        
-        # Images are typically in imagesTr and imagesTs directories
-        image_dirs = [
-            os.path.join(self.downloaded_path, "imagesTr"),
-            os.path.join(self.downloaded_path, "imagesTs")
-        ]
-        
-        paths = []
-        for image_dir in image_dirs:
-            if os.path.exists(image_dir):
-                paths.extend(list(Path(image_dir).glob("*.nii.gz")))
-        
-        return [str(p) for p in paths]
-
-class TCIADataset(Dataset):
-    """TCIA (The Cancer Imaging Archive) dataset"""
-    
-    def __init__(self, collection: str, modality: Optional[str] = None):
-        super().__init__(
-            name=f"TCIA-{collection}",
-            description=f"TCIA {collection} collection"
-        )
-        self.collection = collection
-        self.modality = modality
-        self.client = None
-        self.downloaded_path = None
-    
-    def _get_client(self):
-        """Initialize TCIA client"""
-        try:
-            from tcia_utils import nbia
-            self.client = nbia.NBIA()
-            return self.client
-        except ImportError:
-            logger.error("tcia-utils package not found. Please install with 'pip install tcia-utils'")
-            raise
-    
-    def download(self, destination: str) -> str:
-        """Download TCIA collection"""
-        if not self.client:
-            self._get_client()
-        
-        os.makedirs(destination, exist_ok=True)
-        logger.info(f"Downloading TCIA collection {self.collection} to {destination}")
-        
-        # Get all series
-        series = self.client.get_series(collection=self.collection, modality=self.modality)
-        
-        for s in series:
-            series_id = s.get("SeriesInstanceUID")
-            if not series_id:
-                continue
-            
-            patient_id = s.get("PatientID", "unknown")
-            modality = s.get("Modality", "unknown")
-            
-            # Create patient and modality directories
-            series_dir = os.path.join(destination, patient_id, modality, series_id)
-            os.makedirs(series_dir, exist_ok=True)
-            
-            # Download series
-            logger.info(f"Downloading series {series_id} to {series_dir}")
-            self.client.download_series(series_id, series_dir)
-        
-        self.downloaded_path = destination
-        return destination
-    
-    def get_image_paths(self) -> List[str]:
-        """Get all downloaded DICOM directories"""
-        if not self.downloaded_path or not os.path.exists(self.downloaded_path):
-            raise ValueError("Please download the dataset first")
-        
-        paths = []
-        for root, dirs, files in os.walk(self.downloaded_path):
-            if any(f.endswith('.dcm') for f in files):
-                paths.append(root)
-        
-        return paths
-
-class DatasetFactory:
-    """Dataset creation factory"""
-    
-    @staticmethod
-    def create_dataset(dataset_type: str, **kwargs) -> Dataset:
-        """Create dataset instance"""
-        if dataset_type.lower() == "tcia":
-            # Collection name required
-            if "collection" not in kwargs:
-                raise ValueError("TCIA dataset requires 'collection' parameter")
-            return TCIADataset(
-                collection=kwargs["collection"],
-                modality=kwargs.get("modality")
-            )
-        elif dataset_type.lower() == "medicaldecathlon":
-            # Task name required
-            if "task" not in kwargs:
-                raise ValueError("Medical Decathlon dataset requires 'task' parameter")
-            return MedicalDecathlonDataset(task=kwargs["task"])
-        else:
-            raise ValueError(f"Unsupported dataset type: {dataset_type}")
-
-#--------------------------------------------------------
-# Image Loader Classes
-#--------------------------------------------------------
-class ImageLoader(ABC):
-    """Abstract base class for medical image loaders"""
-    
-    @abstractmethod
-    def load(self, path: str) -> sitk.Image:
-        """Load medical image"""
-        pass
-    
-    @abstractmethod
-    def get_metadata(self, image: sitk.Image) -> Dict:
-        """Get image metadata"""
-        pass
-
-class DicomLoader(ImageLoader):
-    """DICOM format loader"""
-    
-    def load(self, path: str) -> sitk.Image:
-        """Load DICOM series"""
-        if os.path.isdir(path):
-            # Load DICOM directory
-            reader = sitk.ImageSeriesReader()
-            dicom_names = reader.GetGDCMSeriesFileNames(path)
-            reader.SetFileNames(dicom_names)
-            return reader.Execute()
-        else:
-            # Load single DICOM file
-            return sitk.ReadImage(path)
-    
-    def get_metadata(self, image: sitk.Image) -> Dict:
-        """Extract metadata from DICOM"""
-        metadata = {}
-        for key in image.GetMetaDataKeys():
-            metadata[key] = image.GetMetaData(key)
-        return metadata
-
-class NiftiLoader(ImageLoader):
-    """NIfTI format loader"""
-    
-    def load(self, path: str) -> sitk.Image:
-        """Load NIfTI file"""
-        return sitk.ReadImage(path)
-    
-    def get_metadata(self, image: sitk.Image) -> Dict:
-        """Extract limited metadata from NIfTI"""
-        metadata = {}
-        # NIfTI has limited metadata, mainly from header
-        metadata["spacing"] = image.GetSpacing()
-        metadata["origin"] = image.GetOrigin()
-        metadata["direction"] = image.GetDirection()
-        metadata["size"] = image.GetSize()
-        return metadata
-
-#--------------------------------------------------------
-# Preprocessor Classes
-#--------------------------------------------------------
-class Preprocessor(ABC):
-    """Abstract base class for preprocessing steps"""
-    
-    @abstractmethod
-    def process(self, image: sitk.Image) -> sitk.Image:
-        """Process image"""
-        pass
-
-class DenoisePreprocessor(Preprocessor):
-    """Image denoising preprocessor"""
-    
-    def __init__(self, method: str = "median", params: Optional[Dict] = None):
-        self.method = method
-        self.params = params if params else {}
-    
-    def process(self, image: sitk.Image) -> sitk.Image:
-        """Apply denoising"""
-        if self.method == "median":
-            radius = self.params.get("radius", 1)
-            median_filter = sitk.MedianImageFilter()
-            median_filter.SetRadius(radius)
-            return median_filter.Execute(image)
-        elif self.method == "gaussian":
-            sigma = self.params.get("sigma", 1.0)
-            return sitk.DiscreteGaussian(image, sigma)
-        elif self.method == "bilateral":
-            domain_sigma = self.params.get("domain_sigma", 3.0)
-            range_sigma = self.params.get("range_sigma", 0.1)
-            return sitk.Bilateral(image, domain_sigma, range_sigma)
-        else:
-            logger.warning(f"Unsupported denoising method {self.method}, returning original image")
-            return image
-
-class NormalizePreprocessor(Preprocessor):
-    """Image normalization preprocessor"""
-    
-    def __init__(self, method: str = "z-score"):
-        self.method = method
-    
-    def process(self, image: sitk.Image) -> sitk.Image:
-        """Apply normalization"""
-        if self.method == "z-score":
-            array = sitk.GetArrayFromImage(image)
-            mean = np.mean(array)
-            std = np.std(array)
-            if std > 0:
-                normalized_array = (array - mean) / std
-            else:
-                normalized_array = array - mean
-            normalized_image = sitk.GetImageFromArray(normalized_array)
-            normalized_image.CopyInformation(image)
-            return normalized_image
-        elif self.method == "min-max":
-            normalizer = sitk.NormalizeImageFilter()
-            return normalizer.Execute(image)
-        else:
-            logger.warning(f"Unsupported normalization method {self.method}, returning original image")
-            return image
-
-class ResamplePreprocessor(Preprocessor):
-    """Image resampling preprocessor"""
-    
-    def __init__(self, target_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-                 interpolator = sitk.sitkLinear):
-        self.target_spacing = target_spacing
-        self.interpolator = interpolator
-    
-    def process(self, image: sitk.Image) -> sitk.Image:
-        """Resample image to target voxel spacing"""
-        original_spacing = image.GetSpacing()
-        original_size = image.GetSize()
-        
-        # Calculate new size
-        new_size = [
-            int(round(original_size[0] * (original_spacing[0] / self.target_spacing[0]))),
-            int(round(original_size[1] * (original_spacing[1] / self.target_spacing[1]))),
-            int(round(original_size[2] * (original_spacing[2] / self.target_spacing[2])))
-        ]
-        
-        # Apply resampling
-        resample = sitk.ResampleImageFilter()
-        resample.SetInterpolator(self.interpolator)
-        resample.SetOutputSpacing(self.target_spacing)
-        resample.SetSize(new_size)
-        resample.SetOutputDirection(image.GetDirection())
-        resample.SetOutputOrigin(image.GetOrigin())
-        resample.SetDefaultPixelValue(0)
-        
-        return resample.Execute(image)
-
-#--------------------------------------------------------
-# Image Saver Classes
-#--------------------------------------------------------
-class ImageSaver(ABC):
-    """Abstract base class for image savers"""
-    
-    @abstractmethod
-    def save(self, image: sitk.Image, path: str, metadata: Optional[Dict] = None) -> None:
-        """Save image"""
-        pass
-
-class NiftiSaver(ImageSaver):
-    """NIfTI format saver"""
-    
-    def save(self, image: sitk.Image, path: str, metadata: Optional[Dict] = None) -> None:
-        """Save image as NIfTI format"""
-        # Ensure path has correct extension
-        if not path.endswith(('.nii', '.nii.gz')):
-            path = f"{path}.nii.gz"
-        
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        
-        # Save image
-        sitk.WriteImage(image, path)
-        
-        # Add additional metadata to NIfTI header if available
-        if metadata:
-            try:
-                nii_img = nib.load(path)
-                header = nii_img.header
-                
-                # Try to add metadata to header
-                for key, value in metadata.items():
-                    try:
-                        if hasattr(header, key):
-                            setattr(header, key, value)
-                    except:
-                        logger.warning(f"Cannot add metadata {key} to NIfTI header")
-                
-                # Save with updated header
-                new_img = nib.Nifti1Image(nii_img.get_fdata(), nii_img.affine, header)
-                nib.save(new_img, path)
-            except Exception as e:
-                logger.warning(f"Cannot add metadata to NIfTI file: {e}")
-
-#--------------------------------------------------------
-# Processing Pipeline
-#--------------------------------------------------------
-class ProcessingPipeline:
-    """Medical image processing pipeline"""
-    
-    def __init__(self):
-        self.preprocessors = []
-    
-    def add_preprocessor(self, preprocessor: Preprocessor) -> None:
-        """Add preprocessing step"""
-        self.preprocessors.append(preprocessor)
-    
-    def process(self, image: sitk.Image) -> sitk.Image:
-        """Apply all preprocessing steps"""
-        processed_image = image
-        for preprocessor in self.preprocessors:
-            processed_image = preprocessor.process(processed_image)
-        return processed_image
-
-#--------------------------------------------------------
-# Medical Imaging Agent
-#--------------------------------------------------------
 class MedicalImagingAgent:
-    """Medical imaging processing agent"""
-    
+    """医学影像预处理代理类"""
+
     def __init__(self, config_path: Optional[str] = None):
-        self.loaders = {
-            "dicom": DicomLoader(),
-            "nifti": NiftiLoader()
-        }
-        self.savers = {
-            "nifti": NiftiSaver()
-        }
-        self.pipeline = ProcessingPipeline()
+        """
+        初始化医学影像预处理代理
         
-        # Load settings from config file (if available)
-        if config_path and os.path.exists(config_path):
-            self.config = self.load_config(config_path)
-        else:
-            self.config = self.default_config()
-        
-        # Set up preprocessing pipeline based on config
-        self.setup_pipeline()
-    
-    def load_config(self, config_path: str) -> Dict:
-        """Load configuration file"""
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    
-    def default_config(self) -> Dict:
-        """Create default configuration"""
-        return {
+        Args:
+            config_path: 配置文件路径，如果为None则使用默认配置
+        """
+        # 设置默认配置
+        self.config = {
             "output_format": "nifti",
             "target_spacing": [1.0, 1.0, 1.0],
             "preprocessing": {
                 "denoise": {
-                    "method": "median",
-                    "params": {"radius": 1}
+                    "method": "gaussian",
+                    "params": {"sigma": 0.5}
                 },
                 "normalize": {
                     "method": "z-score"
@@ -476,232 +59,658 @@ class MedicalImagingAgent:
                 "resample": {
                     "interpolator": "linear"
                 }
+            },
+            "performance": {
+                "num_workers": "auto",
+                "memory_limit_mb": 4096,
+                "chunk_size_mb": 512,
+                "use_gpu": False,
+                "cache_intermediate_results": True
+            },
+            "logging": {
+                "level": "INFO",
+                "file": "processing.log",
+                "console": True
             }
         }
-    
-    def setup_pipeline(self) -> None:
-        """Set up preprocessing pipeline based on configuration"""
-        # Add denoising preprocessor
-        denoise_config = self.config["preprocessing"]["denoise"]
-        self.pipeline.add_preprocessor(
-            DenoisePreprocessor(
-                method=denoise_config["method"],
-                params=denoise_config.get("params")
-            )
+        
+        # 加载用户配置
+        if config_path:
+            self._load_config(config_path)
+        
+        # 初始化日志系统
+        log_config = self.config.get("logging", {})
+        log_level = getattr(logging, log_config.get("level", "INFO"))
+        log_file = log_config.get("file")
+        log_console = log_config.get("console", True)
+        
+        self.logger = ProcessingLogger(
+            log_file=log_file,
+            console=log_console,
+            level=log_level
         )
         
-        # Add normalization preprocessor
-        normalize_config = self.config["preprocessing"]["normalize"]
-        self.pipeline.add_preprocessor(
-            NormalizePreprocessor(
-                method=normalize_config["method"]
-            )
-        )
+        # 初始化报告生成器
+        report_dir = os.path.dirname(log_file) if log_file else "reports"
+        self.report_generator = ProcessingReport(report_dir)
         
-        # Add resampling preprocessor
-        resample_config = self.config["preprocessing"]["resample"]
-        interpolator_map = {
-            "linear": sitk.sitkLinear,
-            "nearest": sitk.sitkNearestNeighbor,
-            "bspline": sitk.sitkBSpline
+        # 初始化内存管理器
+        perf_config = self.config.get("performance", {})
+        memory_limit = perf_config.get("memory_limit_mb", 4096)
+        self.memory_manager = MemoryManager(memory_limit_mb=memory_limit)
+        
+        # 初始化加载器
+        self.loaders = {
+            "dicom": DicomLoader(),
+            "nifti": NiftiLoader()
         }
-        interpolator = interpolator_map.get(
-            resample_config.get("interpolator", "linear"),
-            sitk.sitkLinear
-        )
         
-        self.pipeline.add_preprocessor(
-            ResamplePreprocessor(
-                target_spacing=tuple(self.config["target_spacing"]),
-                interpolator=interpolator
+        # 初始化保存器
+        self.savers = {
+            "nifti": NiftiSaver()
+        }
+        
+        # 初始化数据集工厂
+        self.dataset_factory = DatasetFactory()
+        
+        self.logger.info("医学影像预处理代理初始化完成")
+
+    def _load_config(self, config_path: str):
+        """
+        从JSON文件加载配置
+        
+        Args:
+            config_path: 配置文件路径
+        """
+        try:
+            with open(config_path, 'r') as f:
+                user_config = json.load(f)
+            
+            # 递归更新配置
+            def update_dict(d, u):
+                for k, v in u.items():
+                    if isinstance(v, dict) and k in d and isinstance(d[k], dict):
+                        d[k] = update_dict(d[k], v)
+                    else:
+                        d[k] = v
+                return d
+            
+            self.config = update_dict(self.config, user_config)
+            print(f"已加载配置: {config_path}")
+        except Exception as e:
+            print(f"加载配置失败: {e}")
+            print("使用默认配置")
+
+    def setup_pipeline(self) -> PreprocessingPipeline:
+        """
+        根据配置设置预处理流水线
+        
+        Returns:
+            预处理流水线对象
+        """
+        pipeline = PreprocessingPipeline()
+        
+        # 获取预处理配置
+        preprocessing_config = self.config.get("preprocessing", {})
+        performance_config = self.config.get("performance", {})
+        use_gpu = performance_config.get("use_gpu", False)
+        
+        # 添加去噪处理器（如果配置中存在）
+        if "denoise" in preprocessing_config:
+            denoise_config = preprocessing_config["denoise"]
+            denoise_method = denoise_config.get("method", "gaussian")
+            denoise_params = denoise_config.get("params", {})
+            
+            denoiser = DenoisingPreprocessor(
+                method=denoise_method,
+                params=denoise_params,
+                use_gpu=use_gpu
             )
-        )
-    
-    def detect_image_type(self, path: str) -> str:
-        """Detect image type"""
-        if os.path.isdir(path):
-            # Check if directory contains DICOM files
-            dicom_files = list(Path(path).glob("**/*.dcm"))
-            if dicom_files:
-                return "dicom"
-        else:
-            # Check file extension
-            if path.endswith((".nii", ".nii.gz")):
-                return "nifti"
-            elif path.endswith((".dcm")):
-                return "dicom"
+            pipeline.add_processor(denoiser)
         
-        # Default to NIfTI
-        return "nifti"
-    
-    def process_image(self, input_path: str, output_path: str) -> None:
-        """Process single medical image"""
-        # Detect image type
-        image_type = self.detect_image_type(input_path)
+        # 添加归一化处理器（如果配置中存在）
+        if "normalize" in preprocessing_config:
+            normalize_config = preprocessing_config["normalize"]
+            normalize_method = normalize_config.get("method", "z-score")
+            normalize_params = normalize_config.get("params", {})
+            
+            normalizer = NormalizationPreprocessor(
+                method=normalize_method,
+                params=normalize_params
+            )
+            pipeline.add_processor(normalizer)
         
-        # Select appropriate loader
-        loader = self.loaders.get(image_type)
-        if not loader:
-            raise ValueError(f"Unsupported image type: {image_type}")
+        # 添加重采样处理器（如果配置中存在）
+        if "resample" in preprocessing_config:
+            resample_config = preprocessing_config["resample"]
+            interpolator = resample_config.get("interpolator", "linear")
+            resample_params = resample_config.get("params", {})
+            
+            # 获取目标间距
+            target_spacing = self.config.get("target_spacing", [1.0, 1.0, 1.0])
+            
+            resampler = ResamplingPreprocessor(
+                target_spacing=target_spacing,
+                interpolator=interpolator,
+                params=resample_params
+            )
+            pipeline.add_processor(resampler)
         
-        # Load image
-        logger.info(f"Loading image: {input_path}")
-        image = loader.load(input_path)
+        return pipeline
+
+    def detect_input_type(self, input_path: str) -> str:
+        """
+        检测输入文件或目录的类型
         
-        # Extract metadata
-        metadata = loader.get_metadata(image)
+        Args:
+            input_path: 输入文件或目录路径
+            
+        Returns:
+            文件类型（'dicom'或'nifti'）
+        """
+        if os.path.isfile(input_path):
+            # 检查文件扩展名
+            if input_path.endswith(('.nii', '.nii.gz')):
+                return 'nifti'
+            elif input_path.endswith(('.dcm')):
+                return 'dicom'
+            else:
+                # 尝试读取文件头以确定类型
+                try:
+                    sitk.ReadImage(input_path)
+                    return 'nifti'  # 假设任何SimpleITK可以读取的文件都是NIfTI
+                except:
+                    pass
+                
+                try:
+                    import pydicom
+                    pydicom.dcmread(input_path)
+                    return 'dicom'
+                except:
+                    pass
         
-        # Apply preprocessing pipeline
-        logger.info("Applying preprocessing pipeline")
-        processed_image = self.pipeline.process(image)
+        elif os.path.isdir(input_path):
+            # 检查目录中的文件
+            # 如果目录中有.dcm文件，则认为是DICOM目录
+            for root, _, files in os.walk(input_path):
+                for file in files:
+                    if file.endswith('.dcm'):
+                        return 'dicom'
+                    if file.endswith(('.nii', '.nii.gz')):
+                        return 'nifti'
+                # 只检查第一级目录
+                break
         
-        # Select saver and save
-        output_format = self.config["output_format"]
-        saver = self.savers.get(output_format)
-        if not saver:
-            raise ValueError(f"Unsupported output format: {output_format}")
+        # 默认为DICOM
+        return 'dicom'
+
+    def process_single_file(self, 
+                           input_file: str, 
+                           output_dir: str, 
+                           config: Optional[Dict] = None) -> str:
+        """
+        处理单个医学影像文件
         
-        logger.info(f"Saving processed image: {output_path}")
-        saver.save(processed_image, output_path, metadata)
-        logger.info("Processing complete")
-    
-    def process_directory(self, input_dir: str, output_dir: str, recursive: bool = True) -> None:
-        """Process all medical images in a directory"""
+        Args:
+            input_file: 输入文件路径
+            output_dir: 输出目录
+            config: 处理配置，None表示使用默认配置
+            
+        Returns:
+            处理后的文件路径
+        """
+        # 使用提供的配置或默认配置
+        config = config or self.config
+        
+        # 记录处理开始
+        start_time = self.logger.log_processing_start(input_file, output_dir, config)
+        
+        try:
+            # 确保输出目录存在
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 检测输入类型
+            input_type = self.detect_input_type(input_file)
+            self.logger.debug(f"检测到输入类型: {input_type}")
+            
+            # 选择相应的加载器
+            if input_type not in self.loaders:
+                raise ValueError(f"不支持的输入类型: {input_type}")
+            
+            loader = self.loaders[input_type]
+            
+            # 确定输出格式和保存器
+            output_format = config.get("output_format", "nifti")
+            if output_format not in self.savers:
+                raise ValueError(f"不支持的输出格式: {output_format}")
+            
+            saver = self.savers[output_format]
+            
+            # 生成输出文件路径
+            base_name = os.path.splitext(os.path.basename(input_file))[0]
+            if base_name.endswith('.nii'):  # 处理.nii.gz情况
+                base_name = os.path.splitext(base_name)[0]
+                
+            output_file = os.path.join(
+                output_dir, 
+                f"{base_name}_processed.nii.gz"
+            )
+            
+            # 设置处理流水线
+            pipeline = self.setup_pipeline()
+            
+            # 使用内存管理器处理大型文件
+            use_memory_manager = False
+            try:
+                # 尝试获取文件大小和内存需求
+                file_size = os.path.getsize(input_file)
+                # 如果文件大于1GB或接近可用内存的一半，使用内存管理器
+                if file_size > 1024 * 1024 * 1024 or file_size > self.memory_manager.memory_limit * 0.5:
+                    use_memory_manager = True
+            except:
+                # 如果无法获取文件大小，默认使用常规处理
+                pass
+            
+            if use_memory_manager:
+                self.logger.info(f"使用内存管理器处理大型文件: {input_file}")
+                
+                # 定义处理函数
+                def processor_func(image_chunk):
+                    return pipeline.process(image_chunk)
+                
+                # 使用内存管理器处理
+                output_path = self.memory_manager.process_large_volume(
+                    input_file=input_file,
+                    processor=processor_func,
+                    output_file=output_file
+                )
+            else:
+                # 常规处理
+                self.logger.info(f"加载图像: {input_file}")
+                image = loader.load(input_file)
+                
+                self.logger.info("应用预处理流水线")
+                processed_image = pipeline.process(image)
+                
+                self.logger.info(f"保存处理后的图像: {output_file}")
+                saver.save(processed_image, output_file)
+                
+                output_path = output_file
+            
+            # 记录处理结束
+            processing_time = time.time() - start_time
+            self.logger.log_processing_end(start_time, success=True)
+            
+            # 添加到报告
+            self.report_generator.add_file_result(
+                input_file=input_file,
+                output_file=output_path,
+                processing_time=processing_time,
+                success=True
+            )
+            
+            return output_path
+            
+        except Exception as e:
+            # 记录错误
+            self.logger.error(f"处理文件时出错: {e}")
+            self.logger.log_processing_end(start_time, success=False)
+            
+            # 添加到报告
+            processing_time = time.time() - start_time
+            self.report_generator.add_file_result(
+                input_file=input_file,
+                output_file="",
+                processing_time=processing_time,
+                success=False,
+                error_message=str(e)
+            )
+            
+            raise
+
+    def _process_single_file_wrapper(self, args):
+        """
+        处理单个文件的包装函数，用于多进程
+        
+        Args:
+            args: 包含input_file, output_dir, config的元组
+            
+        Returns:
+            处理后的文件路径
+        """
+        input_file, output_dir, config = args
+        return self.process_single_file(input_file, output_dir, config)
+
+    def process_batch(self, 
+                     input_files: List[str], 
+                     output_dir: str, 
+                     config: Optional[Dict] = None,
+                     num_workers: Optional[int] = None) -> List[str]:
+        """
+        并行处理一批医学影像文件
+        
+        Args:
+            input_files: 输入文件路径列表
+            output_dir: 输出目录
+            config: 处理配置，None表示使用默认配置
+            num_workers: 工作进程数，None表示自动决定
+            
+        Returns:
+            处理后的文件路径列表
+        """
+        # 使用提供的配置或默认配置
+        config = config or self.config
+        
+        # 确定工作进程数
+        if num_workers is None:
+            perf_config = config.get("performance", {})
+            num_workers_config = perf_config.get("num_workers", "auto")
+            
+            if num_workers_config == "auto":
+                # 使用可用CPU核心数的75%
+                num_workers = max(1, int(multiprocessing.cpu_count() * 0.75))
+            else:
+                try:
+                    num_workers = int(num_workers_config)
+                except:
+                    num_workers = 1
+        
+        self.logger.info(f"使用 {num_workers} 个工作进程进行批处理")
+        
+        # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
         
-        # Get all files and directories
-        if recursive:
-            all_paths = list(Path(input_dir).glob("**/*"))
+        if num_workers <= 1:
+            # 使用单进程处理（便于调试）
+            results = []
+            for input_file in tqdm(input_files, desc="处理文件"):
+                result = self.process_single_file(input_file, output_dir, config)
+                results.append(result)
+            return results
         else:
-            all_paths = list(Path(input_dir).glob("*"))
-        
-        # Process each file/directory
-        for path in all_paths:
-            try:
-                path_str = str(path)
-                
-                # Skip output directory
-                if os.path.abspath(path_str).startswith(os.path.abspath(output_dir)):
-                    continue
-                
-                # Detect if it's a processable image
-                image_type = self.detect_image_type(path_str)
-                
-                if image_type:
-                    # Build output path
-                    rel_path = os.path.relpath(path_str, input_dir)
-                    
-                    # Handle special case for DICOM directories
-                    if image_type == "dicom" and os.path.isdir(path_str):
-                        output_file = f"{rel_path.replace(os.sep, '_')}.nii.gz"
-                    else:
-                        # For other formats, keep filename but change extension
-                        output_file = os.path.splitext(rel_path)[0]
-                        output_file = f"{output_file.replace(os.sep, '_')}.nii.gz"
-                    
-                    output_path = os.path.join(output_dir, output_file)
-                    
-                    # Process image
-                    self.process_image(path_str, output_path)
+            # 使用多进程处理
+            process_args = [(input_file, output_dir, config) 
+                          for input_file in input_files]
             
-            except Exception as e:
-                logger.error(f"Error processing {path}: {e}")
-                continue
+            with multiprocessing.Pool(processes=num_workers) as pool:
+                results = list(tqdm(
+                    pool.imap(self._process_single_file_wrapper, process_args),
+                    total=len(input_files),
+                    desc="处理文件"
+                ))
+            
+            return results
 
-#--------------------------------------------------------
-# Command-line Interface
-#--------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser(description="Medical Imaging Dataset Download and Preprocessing Tool")
-    subparsers = parser.add_subparsers(dest="command", help="Sub-commands")
-    
-    # Download dataset command
-    download_parser = subparsers.add_parser("download", help="Download medical imaging dataset")
-    download_parser.add_argument("--type", required=True, choices=["tcia", "medicaldecathlon"], 
-                                help="Dataset type")
-    download_parser.add_argument("--destination", required=True, help="Download destination directory")
-    download_parser.add_argument("--collection", help="TCIA collection name (TCIA only)")
-    download_parser.add_argument("--modality", help="Imaging modality (TCIA only)")
-    download_parser.add_argument("--task", help="Medical Decathlon task (Medical Decathlon only)")
-    
-    # Process command
-    process_parser = subparsers.add_parser("process", help="Process medical images")
-    process_parser.add_argument("--input", required=True, help="Input directory or file")
-    process_parser.add_argument("--output", required=True, help="Output directory")
-    process_parser.add_argument("--config", help="Configuration file path")
-    
-    # Pipeline command (download and process)
-    pipeline_parser = subparsers.add_parser("pipeline", help="Download and process medical imaging dataset")
-    pipeline_parser.add_argument("--type", required=True, choices=["tcia", "medicaldecathlon"], 
-                                help="Dataset type")
-    pipeline_parser.add_argument("--download-dir", required=True, help="Download destination directory")
-    pipeline_parser.add_argument("--output-dir", required=True, help="Processing output directory")
-    pipeline_parser.add_argument("--config", help="Processing configuration file path")
-    pipeline_parser.add_argument("--collection", help="TCIA collection name (TCIA only)")
-    pipeline_parser.add_argument("--modality", help="Imaging modality (TCIA only)")
-    pipeline_parser.add_argument("--task", help="Medical Decathlon task (Medical Decathlon only)")
-    
-    args = parser.parse_args()
-    
-    if args.command == "download":
-        # Download dataset
-        dataset_args = {}
-        if args.type == "tcia":
-            if not args.collection:
-                parser.error("TCIA dataset requires --collection parameter")
-            dataset_args["collection"] = args.collection
-            if args.modality:
-                dataset_args["modality"] = args.modality
-        elif args.type == "medicaldecathlon":
-            if not args.task:
-                parser.error("Medical Decathlon dataset requires --task parameter")
-            dataset_args["task"] = args.task
+    def process_directory(self, 
+                         input_dir: str, 
+                         output_dir: str, 
+                         config: Optional[Dict] = None,
+                         file_pattern: str = "*",
+                         recursive: bool = True,
+                         num_workers: Optional[int] = None) -> List[str]:
+        """
+        处理目录中的医学影像文件
         
-        # Create and download dataset
-        dataset = DatasetFactory.create_dataset(args.type, **dataset_args)
-        download_path = dataset.download(args.destination)
-        print(f"Dataset downloaded to {download_path}")
-    
-    elif args.command == "process":
-        # Process medical images
-        agent = MedicalImagingAgent(config_path=args.config)
+        Args:
+            input_dir: 输入目录
+            output_dir: 输出目录
+            config: 处理配置，None表示使用默认配置
+            file_pattern: 文件匹配模式
+            recursive: 是否递归处理子目录
+            num_workers: 工作进程数，None表示自动决定
+            
+        Returns:
+            处理后的文件路径列表
+        """
+        input_files = []
+        input_type = self.detect_input_type(input_dir)
         
-        if os.path.isdir(args.input):
-            agent.process_directory(args.input, args.output)
+        if input_type == 'dicom':
+            # 对于DICOM，整个目录被视为一个单独的体积
+            self.logger.info(f"将整个DICOM目录 {input_dir} 作为一个体积处理")
+            return [self.process_single_file(input_dir, output_dir, config)]
         else:
-            output_file = os.path.join(args.output, os.path.basename(args.input))
-            if not output_file.endswith(('.nii', '.nii.gz')):
-                output_file = f"{os.path.splitext(output_file)[0]}.nii.gz"
-            agent.process_image(args.input, output_file)
+            # 对于其他类型，搜集匹配的文件
+            if recursive:
+                for root, _, files in os.walk(input_dir):
+                    for file in files:
+                        if file.endswith(('.nii', '.nii.gz', '.dcm')):
+                            input_files.append(os.path.join(root, file))
+            else:
+                # 仅搜索顶级目录
+                for file in os.listdir(input_dir):
+                    file_path = os.path.join(input_dir, file)
+                    if os.path.isfile(file_path) and file.endswith(('.nii', '.nii.gz', '.dcm')):
+                        input_files.append(file_path)
         
-        print(f"Processing complete, results saved to {args.output}")
+        self.logger.info(f"找到 {len(input_files)} 个要处理的文件")
+        return self.process_batch(input_files, output_dir, config, num_workers)
+
+    def download(self, 
+                dataset_type: str, 
+                destination: str, 
+                **kwargs) -> str:
+        """
+        下载医学影像数据集
+        
+        Args:
+            dataset_type: 数据集类型（例如'medicaldecathlon'或'tcia'）
+            destination: 下载目的地目录
+            **kwargs: 数据集特定参数
+        
+        Returns:
+            下载数据集的路径
+        """
+        self.logger.info(f"下载 {dataset_type} 数据集到 {destination}")
+        
+        # 创建数据集实例
+        dataset = self.dataset_factory.create(dataset_type, **kwargs)
+        
+        # 下载数据集
+        download_path = dataset.download(destination)
+        
+        self.logger.info(f"数据集下载完成: {download_path}")
+        return download_path
+
+    def pipeline(self, 
+                dataset_type: str, 
+                download_dir: str, 
+                output_dir: str, 
+                config: Optional[Dict] = None,
+                **kwargs) -> List[str]:
+        """
+        完整的下载-处理流水线
+        
+        Args:
+            dataset_type: 数据集类型
+            download_dir: 下载目录
+            output_dir: 处理后的输出目录
+            config: 处理配置，None表示使用默认配置
+            **kwargs: 数据集特定参数
+            
+        Returns:
+            处理后文件的路径列表
+        """
+        # 使用提供的配置或默认配置
+        config = config or self.config
+        
+        # 下载数据集
+        dataset_path = self.download(dataset_type, download_dir, **kwargs)
+        
+        # 创建数据集对象以获取图像路径
+        dataset = self.dataset_factory.create(dataset_type, **kwargs)
+        dataset.download_path = dataset_path  # 设置下载路径属性
+        
+        # 获取图像路径
+        image_paths = dataset.get_image_paths()
+        
+        self.logger.info(f"找到 {len(image_paths)} 个要处理的图像")
+        
+        # 处理图像
+        return self.process_batch(image_paths, output_dir, config)
+
+    def generate_final_report(self) -> str:
+        """
+        生成最终处理报告
+        
+        Returns:
+            报告文件路径
+        """
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_file = f"processing_report_{timestamp}.json"
+        
+        report_path = self.report_generator.save_report(report_file)
+        self.logger.info(f"处理报告已保存到: {report_path}")
+        
+        return report_path
+
+
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='医学影像预处理代理')
+    subparsers = parser.add_subparsers(dest='command', help='要执行的命令')
     
-    elif args.command == "pipeline":
-        # Download and process dataset
-        # 1. Download dataset
-        dataset_args = {}
-        if args.type == "tcia":
-            if not args.collection:
-                parser.error("TCIA dataset requires --collection parameter")
-            dataset_args["collection"] = args.collection
+    # 下载命令
+    download_parser = subparsers.add_parser('download', help='下载数据集')
+    download_parser.add_argument('--type', required=True, 
+                              help='数据集类型 (medicaldecathlon或tcia)')
+    download_parser.add_argument('--destination', required=True, 
+                              help='下载目的地目录')
+    download_parser.add_argument('--task', 
+                              help='Medical Decathlon任务 (仅用于medicaldecathlon)')
+    download_parser.add_argument('--collection', 
+                              help='TCIA集合名称 (仅用于TCIA)')
+    download_parser.add_argument('--modality', 
+                              help='成像模态 (仅用于TCIA)')
+    
+    # 处理命令
+    process_parser = subparsers.add_parser('process', help='处理图像')
+    process_parser.add_argument('--input', required=True, 
+                             help='输入目录或文件')
+    process_parser.add_argument('--output', required=True, 
+                             help='输出目录')
+    process_parser.add_argument('--config', default='config.json', 
+                             help='配置文件路径')
+    process_parser.add_argument('--num-workers', type=int, 
+                             help='并行工作进程数')
+    process_parser.add_argument('--gpu', action='store_true', 
+                             help='使用GPU加速（如果可用）')
+    process_parser.add_argument('--memory-limit', type=int, 
+                             help='内存限制（MB）')
+    
+    # 流水线命令
+    pipeline_parser = subparsers.add_parser('pipeline', 
+                                         help='下载并处理数据集')
+    pipeline_parser.add_argument('--type', required=True, 
+                              help='数据集类型 (medicaldecathlon或tcia)')
+    pipeline_parser.add_argument('--download-dir', required=True, 
+                              help='下载目录')
+    pipeline_parser.add_argument('--output-dir', required=True, 
+                              help='输出目录')
+    pipeline_parser.add_argument('--config', default='config.json', 
+                              help='配置文件路径')
+    pipeline_parser.add_argument('--task', 
+                              help='Medical Decathlon任务 (仅用于medicaldecathlon)')
+    pipeline_parser.add_argument('--collection', 
+                              help='TCIA集合名称 (仅用于TCIA)')
+    pipeline_parser.add_argument('--modality', 
+                              help='成像模态 (仅用于TCIA)')
+    pipeline_parser.add_argument('--num-workers', type=int, 
+                              help='并行工作进程数')
+    pipeline_parser.add_argument('--gpu', action='store_true', 
+                              help='使用GPU加速（如果可用）')
+    
+    return parser.parse_args()
+
+
+def main():
+    """主函数"""
+    args = parse_args()
+    
+    # 如果没有指定命令，显示帮助并退出
+    if not args.command:
+        parse_args(["--help"])
+        return
+    
+    try:
+        # 初始化代理
+        config_path = args.config if hasattr(args, 'config') else None
+        agent = MedicalImagingAgent(config_path=config_path)
+        
+        # 处理GPU选项
+        if hasattr(args, 'gpu') and args.gpu:
+            if 'performance' not in agent.config:
+                agent.config['performance'] = {}
+            agent.config['performance']['use_gpu'] = True
+        
+        # 处理内存限制选项
+        if hasattr(args, 'memory_limit') and args.memory_limit:
+            if 'performance' not in agent.config:
+                agent.config['performance'] = {}
+            agent.config['performance']['memory_limit_mb'] = args.memory_limit
+        
+        # 执行相应命令
+        if args.command == 'download':
+            dataset_type = args.type
+            destination = args.destination
+            kwargs = {}
+            
+            if args.task:
+                kwargs['task'] = args.task
+            if args.collection:
+                kwargs['collection'] = args.collection
             if args.modality:
-                dataset_args["modality"] = args.modality
-        elif args.type == "medicaldecathlon":
-            if not args.task:
-                parser.error("Medical Decathlon dataset requires --task parameter")
-            dataset_args["task"] = args.task
+                kwargs['modality'] = args.modality
+            
+            agent.download(dataset_type, destination, **kwargs)
+            
+        elif args.command == 'process':
+            input_path = args.input
+            output_dir = args.output
+            num_workers = args.num_workers if hasattr(args, 'num_workers') else None
+            
+            if os.path.isdir(input_path):
+                agent.process_directory(input_path, output_dir, 
+                                      num_workers=num_workers)
+            else:
+                agent.process_single_file(input_path, output_dir)
+            
+            # 生成报告
+            agent.generate_final_report()
+            
+        elif args.command == 'pipeline':
+            dataset_type = args.type
+            download_dir = args.download_dir
+            output_dir = args.output_dir
+            kwargs = {}
+            
+            if args.task:
+                kwargs['task'] = args.task
+            if args.collection:
+                kwargs['collection'] = args.collection
+            if args.modality:
+                kwargs['modality'] = args.modality
+            
+            num_workers = args.num_workers if hasattr(args, 'num_workers') else None
+            if num_workers:
+                if 'performance' not in agent.config:
+                    agent.config['performance'] = {}
+                agent.config['performance']['num_workers'] = num_workers
+            
+            agent.pipeline(dataset_type, download_dir, output_dir, **kwargs)
+            
+            # 生成报告
+            agent.generate_final_report()
         
-        dataset = DatasetFactory.create_dataset(args.type, **dataset_args)
-        download_path = dataset.download(args.download_dir)
-        print(f"Dataset downloaded to {download_path}")
+        print("处理完成！")
         
-        # 2. Process dataset
-        agent = MedicalImagingAgent(config_path=args.config)
-        agent.process_directory(download_path, args.output_dir)
-        print(f"Processing complete, results saved to {args.output_dir}")
-    
-    else:
-        parser.print_help()
+    except Exception as e:
+        print(f"错误: {e}")
+        # 打印堆栈跟踪以便调试
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
