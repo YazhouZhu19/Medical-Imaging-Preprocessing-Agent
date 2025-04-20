@@ -1,125 +1,169 @@
-"""数据集模块，用于下载和管理医学影像数据集"""
+"""
+数据集基类，定义所有数据集的通用接口
+"""
+
 import os
 import json
 import requests
 import tarfile
 import zipfile
+import logging
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor
+from typing import List, Dict, Any, Optional
 from tqdm import tqdm
+
 
 class Dataset(ABC):
     """数据集抽象基类"""
     
-    def __init__(self, name, description=""):
+    def __init__(self, name: str, description: str = ""):
+        """
+        初始化数据集
+        
+        Args:
+            name: 数据集名称
+            description: 数据集描述
+        """
         self.name = name
         self.description = description
+        self.download_path = None
+        self.logger = logging.getLogger(f"medical_imaging_agent.dataset.{name}")
     
     @abstractmethod
     def download(self, destination: str) -> str:
-        """下载数据集到指定目的地"""
+        """
+        下载数据集到指定目的地
+        
+        Args:
+            destination: 下载目的地目录
+            
+        Returns:
+            数据集路径
+        """
         pass
     
     @abstractmethod
-    def get_image_paths(self) -> list:
-        """获取所有图像路径"""
+    def get_image_paths(self) -> List[str]:
+        """
+        获取数据集中的所有图像路径
+        
+        Returns:
+            图像路径列表
+        """
         pass
     
-    def download_file(self, url, filepath, chunk_size=8192):
-        """使用分块下载大文件，显示进度条"""
+    def download_file(self, url: str, filepath: str, chunk_size: int = 8192) -> str:
+        """
+        使用分块下载大文件，显示进度条
+        
+        Args:
+            url: 文件URL
+            filepath: 本地保存路径
+            chunk_size: 分块大小（字节）
+            
+        Returns:
+            下载的文件路径
+        """
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+        
+        self.logger.info(f"下载: {url} -> {filepath}")
+        
         response = requests.get(url, stream=True)
         response.raise_for_status()
         
         total_size = int(response.headers.get('content-length', 0))
-        progress_bar = tqdm(total=total_size, unit='B', unit_scale=True)
         
         with open(filepath, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=chunk_size):
-                if chunk:
-                    f.write(chunk)
-                    progress_bar.update(len(chunk))
+            with tqdm(total=total_size, unit='B', unit_scale=True, desc=os.path.basename(filepath)) as progress_bar:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        progress_bar.update(len(chunk))
         
-        progress_bar.close()
+        self.logger.info(f"下载完成: {filepath}")
         return filepath
     
-    def extract_archive(self, archive_path, extract_path, archive_type=None):
-        """提取压缩文件到指定路径"""
+    def extract_archive(self, 
+                       archive_path: str, 
+                       extract_path: str, 
+                       archive_type: Optional[str] = None) -> str:
+        """
+        提取压缩文件到指定路径
+        
+        Args:
+            archive_path: 压缩文件路径
+            extract_path: 提取目的地路径
+            archive_type: 归档类型 ('zip', 'targz')，如果为None则自动检测
+            
+        Returns:
+            提取目录路径
+        """
+        os.makedirs(extract_path, exist_ok=True)
+        
         if archive_type is None:
             # 根据扩展名推断类型
             if archive_path.endswith('.zip'):
                 archive_type = 'zip'
             elif archive_path.endswith('.tar.gz') or archive_path.endswith('.tgz'):
                 archive_type = 'targz'
+            elif archive_path.endswith('.tar'):
+                archive_type = 'tar'
             else:
                 raise ValueError(f"无法确定归档文件类型: {archive_path}")
         
-        if archive_type == 'zip':
-            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-                total_files = len(zip_ref.infolist())
-                for i, file in enumerate(zip_ref.infolist()):
-                    zip_ref.extract(file, extract_path)
-                    print(f"提取中... {i+1}/{total_files}", end='\r')
+        self.logger.info(f"提取归档: {archive_path} -> {extract_path} (类型: {archive_type})")
+        
+        try:
+            if archive_type == 'zip':
+                with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                    total_files = len(zip_ref.infolist())
+                    
+                    for i, file in enumerate(zip_ref.infolist()):
+                        zip_ref.extract(file, extract_path)
+                        if i % 50 == 0 or i == total_files - 1:  # 每50个文件或最后一个文件更新一次
+                            self.logger.debug(f"提取中... {i+1}/{total_files}")
                 
-        elif archive_type == 'targz':
-            with tarfile.open(archive_path, 'r:gz') as tar_ref:
-                total_files = len(tar_ref.getmembers())
-                for i, member in enumerate(tar_ref.getmembers()):
-                    tar_ref.extract(member, extract_path)
-                    print(f"提取中... {i+1}/{total_files}", end='\r')
+            elif archive_type == 'targz':
+                with tarfile.open(archive_path, 'r:gz') as tar_ref:
+                    total_files = len(tar_ref.getmembers())
+                    
+                    for i, member in enumerate(tar_ref.getmembers()):
+                        tar_ref.extract(member, extract_path)
+                        if i % 50 == 0 or i == total_files - 1:  # 每50个文件或最后一个文件更新一次
+                            self.logger.debug(f"提取中... {i+1}/{total_files}")
+            
+            elif archive_type == 'tar':
+                with tarfile.open(archive_path, 'r') as tar_ref:
+                    total_files = len(tar_ref.getmembers())
+                    
+                    for i, member in enumerate(tar_ref.getmembers()):
+                        tar_ref.extract(member, extract_path)
+                        if i % 50 == 0 or i == total_files - 1:  # 每50个文件或最后一个文件更新一次
+                            self.logger.debug(f"提取中... {i+1}/{total_files}")
+            
+            self.logger.info(f"归档提取完成: {archive_path} -> {extract_path}")
+            return extract_path
+            
+        except Exception as e:
+            self.logger.error(f"提取归档时出错: {e}")
+            raise
         
-        print(f"\n归档提取完成: {archive_path} -> {extract_path}")
-        return extract_path
-
-
-class MedicalDecathlonDataset(Dataset):
-    """Medical Decathlon数据集实现"""
+    def get_metadata(self) -> Dict[str, Any]:
+        """
+        获取数据集元数据
+        
+        Returns:
+            数据集元数据字典
+        """
+        metadata = {
+            "name": self.name,
+            "description": self.description,
+            "download_path": self.download_path
+        }
+        
+        # 子类可以扩展此方法添加更多元数据
+        return metadata
     
-    # 任务映射到URL
-    TASK_URLS = {
-        "Task01_BrainTumour": "https://msd-for-monai.s3-us-west-2.amazonaws.com/Task01_BrainTumour.tar",
-        "Task02_Heart": "https://msd-for-monai.s3-us-west-2.amazonaws.com/Task02_Heart.tar",
-        # ... 其他任务
-    }
-    
-    def __init__(self, task):
-        super().__init__(name=f"MedicalDecathlon_{task}")
-        self.task = task
-        
-        if task not in self.TASK_URLS:
-            raise ValueError(f"未知的Medical Decathlon任务: {task}")
-    
-    def download(self, destination: str) -> str:
-        """下载指定的任务数据集"""
-        os.makedirs(destination, exist_ok=True)
-        
-        task_url = self.TASK_URLS[self.task]
-        filename = os.path.basename(task_url)
-        download_path = os.path.join(destination, filename)
-        
-        if os.path.exists(download_path):
-            print(f"文件已存在: {download_path}")
-        else:
-            print(f"下载 {self.task} 到 {download_path}...")
-            self.download_file(task_url, download_path)
-        
-        extract_path = os.path.join(destination, self.task)
-        if not os.path.exists(extract_path):
-            print(f"提取 {download_path} 到 {extract_path}...")
-            self.extract_archive(download_path, destination)
-        
-        return extract_path
-    
-    def get_image_paths(self) -> list:
-        """获取数据集中的所有图像路径"""
-        if not hasattr(self, 'download_path'):
-            raise RuntimeError("请先调用download方法")
-        
-        image_paths = []
-        images_dir = os.path.join(self.download_path, "imagesTr")
-        
-        if os.path.exists(images_dir):
-            for filename in os.listdir(images_dir):
-                if filename.endswith('.nii.gz'):
-                    image_paths.append(os.path.join(images_dir, filename))
-        
-        return image_paths
+    def __str__(self) -> str:
+        """字符串表示"""
+        return f"{self.name}: {self.description}"
