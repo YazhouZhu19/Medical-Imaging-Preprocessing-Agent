@@ -1,7 +1,7 @@
 # 🛠️ Medical Imaging Data Preprocessing 
 
 
-A flexible Python agent for automatically downloading open-source medical imaging datasets, applying standardized preprocessing, and saving to a unified format (NIfTI by default).
+A flexible agent for automatically downloading open-source medical imaging datasets, applying standardized preprocessing, and saving to a unified format (NIfTI by default).
 
 [![Python 3.6+](https://img.shields.io/badge/python-3.6+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
